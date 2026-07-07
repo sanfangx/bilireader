@@ -1,0 +1,95 @@
+name: bilireader
+description: "BiliReader — 現代化小說閱讀器（Flutter 重製）"
+# 私有專案，禁止意外發佈到 pub.dev。
+publish_to: 'none'
+
+# App 版本（versionName+versionCode）。注意：API 送出的 App-Version-Code: 39
+# 是網路層 header（見 apk/docs），與此處 APK 版本號無關，於網路層階段設定。
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.0
+
+# 核心套件版本刻意釘在與目前 Flutter stable（3.32 / Dart 3.8）相容的成熟線：
+# Riverpod 3.x/annotation 4.x 的 codegen 需要 Dart >=3.9，故採 Riverpod 2.6 線。
+dependencies:
+  flutter:
+    sdk: flutter
+  # 繁體中文（zh-TW）本地化（規範 §5.0）。Flutter SDK 內建，非第三方套件。
+  flutter_localizations:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # 狀態管理 / DI（規範 §2）。codegen 風格：riverpod_annotation + riverpod_generator。
+  flutter_riverpod: ^3.3.2
+  riverpod_annotation: ^4.0.3
+
+  # 路由（規範 §2）。底部分頁採 StatefulShellRoute.indexedStack。
+  go_router: ^17.3.0
+
+  # HTTP client（規範 §2）。網路層於 Phase 2 實作。
+  dio: ^5.7.0
+
+  # Immutable model / union state 與 JSON（規範 §2）。runtime annotation 套件。
+  freezed_annotation: ^3.1.0
+  json_annotation: ^4.12.0
+
+  # 圖片載入 / 快取（規範 §2、§7.6）。實際封裝元件於網路/圖片階段建立。
+  cached_network_image: ^3.4.1
+
+  # 網路 / 認證 / 簽章基礎（Phase 2，規範 §7.3、§7.4）。
+  flutter_secure_storage: ^10.3.1 # token 安全儲存
+  shared_preferences: ^2.5.3 # uid / groupid / 設定
+  crypto: ^3.0.7 # md5 proof + HMAC-SHA256（BNUP2）
+  uuid: ^4.5.3 # nonce（UUID v4 no-dash）
+  drift: ^2.31.0
+  sqlite3_flutter_libs: ^0.6.0+eol
+  path_provider: ^2.1.5
+  path: ^1.9.1
+  device_info_plus: ^13.2.0
+  web_socket_channel: ^3.0.1 # 通知 / 私訊 WebSocket（feature ⑥，doc 08）
+  image_picker: ^1.1.2 # 作者插圖 / 封面 + 圈子貼文圖片（Multipart🔒，feature ⑦）
+  http_parser: ^4.1.2 # MediaType（Multipart 檔案型別）
+  cross_file: ^0.3.4+2 # XFile：跨層傳遞已選圖片（dio MultipartFile 僅限資料層）
+  url_launcher: ^6.3.1 # 開啟外部連結：強更 appUrl / 啟動公告 actionUrl（feature ⑧）
+  photo_view: ^0.15.0 # 閱讀器插圖點擊大圖預覽（縮放/拖曳，Phase 5 ③）
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  # Lint 基線（規範 §8.1），另於 analysis_options.yaml 收嚴。
+  flutter_lints: ^6.0.0
+
+  # Code generation 工具鏈（規範 §2、§8.3）。
+  build_runner: ^2.4.13
+  riverpod_generator: ^4.0.4
+  freezed: ^3.0.0
+  json_serializable: ^6.8.0
+  drift_dev: ^2.20.0
+
+flutter:
+  uses-material-design: true
+
+  # OpenCC 官方字典（Apache-2.0，規範 §5.0 簡繁轉換）。打包以離線使用。
+  assets:
+    - assets/opencc/
+
+  # 設計稿字體（design/bilireader_ui_design.html）：UI=Noto Sans TC、
+  # 標題/閱讀=Noto Serif TC、數字/eyebrow=Space Grotesk。皆為可變字體，
+  # 字重由 TextStyle.fontWeight 驅動 wght 軸。打包以確保離線可用與 golden 決定性。
+  fonts:
+    - family: NotoSansTC
+      fonts:
+        - asset: assets/fonts/NotoSansTC-VariableFont_wght.ttf
+    - family: NotoSerifTC
+      fonts:
+        - asset: assets/fonts/NotoSerifTC-VariableFont_wght.ttf
+    - family: SpaceGrotesk
+      fonts:
+        - asset: assets/fonts/SpaceGrotesk-VariableFont_wght.ttf
+    # 閱讀器可選圓體（使用者提供之 iPhone 圓體，自 TTC 萃取 STHeiti TC 單一面）。
+    - family: RoundedTC
+      fonts:
+        - asset: assets/fonts/RoundedTC.ttf

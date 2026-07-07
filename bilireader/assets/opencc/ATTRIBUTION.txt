@@ -1,0 +1,9 @@
+OpenCC 字典資料（STPhrases / STCharacters / TWVariants / TWPhrases /
+TSPhrases / TSCharacters）來源與授權：
+
+- 專案：Open Chinese Convert (OpenCC)
+- 來源：https://github.com/BYVoid/OpenCC
+- 授權：Apache License 2.0
+
+本 App 以純 Dart 實作 OpenCC 標準最長匹配轉換（core/text/opencc_converter.dart），
+字典檔即上述 Apache-2.0 資料，隨 App 打包以供離線繁簡轉換（規範 §5.0）。

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  規範 §2.1 與 apk/docs/flutter/01：release 全域禁止明文流量，且不得保留
+  原始 App 的開發 LAN 例外 192.168.31.176。debug-overrides 僅在 debug build
+  信任 user CA，方便抓包驗證，不影響 release。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>

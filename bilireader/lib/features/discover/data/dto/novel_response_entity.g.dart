@@ -1,0 +1,80 @@
+// GENERATED CODE - DO NOT MODIFY BY HAND
+
+part of 'novel_response_entity.dart';
+
+// **************************************************************************
+// JsonSerializableGenerator
+// **************************************************************************
+
+_NovelResponseEntity _$NovelResponseEntityFromJson(Map<String, dynamic> json) =>
+    _NovelResponseEntity(
+      articleId: (json['articleid'] as num?)?.toInt() ?? 0,
+      articleName: json['articlename'] as String?,
+      author: json['author'] as String?,
+      authorId: (json['authorid'] as num?)?.toInt() ?? 0,
+      translator: json['translator'] as String?,
+      translatorId: (json['translatorid'] as num?)?.toInt() ?? 0,
+      illustrator: json['illustrator'] as String?,
+      cover: json['cover'] as String?,
+      intro: json['intro'] as String?,
+      keywords: json['keywords'] as String?,
+      lastUpdate: (json['lastupdate'] as num?)?.toInt(),
+      lastUpdates: json['lastupdates'] as String?,
+      lastVolume: json['lastvolume'] as String?,
+      fullFlag: (json['fullflag'] as num?)?.toInt() ?? 0,
+      anime: (json['anime'] as num?)?.toInt() ?? 0,
+      original: (json['original'] as num?)?.toInt() ?? 0,
+      isVip: (json['isvip'] as num?)?.toInt() ?? 0,
+      isSign: (json['issign'] as num?)?.toInt() ?? 0,
+      rGroup: (json['rgroup'] as num?)?.toInt() ?? 0,
+      progress: (json['progress'] as num?)?.toInt() ?? 0,
+      words: (json['words'] as num?)?.toInt() ?? 0,
+      hot: (json['hot'] as num?)?.toInt() ?? 0,
+      goodNum: (json['goodnum'] as num?)?.toInt() ?? 0,
+      rateNum: (json['ratenum'] as num?)?.toInt() ?? 0,
+      rateSum: (json['ratesum'] as num?)?.toInt() ?? 0,
+      allVisit: (json['allvisit'] as num?)?.toInt() ?? 0,
+      weekVisit: (json['weekvisit'] as num?)?.toInt() ?? 0,
+      allFlower: (json['allflower'] as num?)?.toInt() ?? 0,
+      allVote: (json['allvote'] as num?)?.toInt() ?? 0,
+      dayVote: (json['dayvote'] as num?)?.toInt() ?? 0,
+      weekVote: (json['weekvote'] as num?)?.toInt() ?? 0,
+      monthVote: (json['monthvote'] as num?)?.toInt() ?? 0,
+    );
+
+Map<String, dynamic> _$NovelResponseEntityToJson(
+  _NovelResponseEntity instance,
+) => <String, dynamic>{
+  'articleid': instance.articleId,
+  'articlename': instance.articleName,
+  'author': instance.author,
+  'authorid': instance.authorId,
+  'translator': instance.translator,
+  'translatorid': instance.translatorId,
+  'illustrator': instance.illustrator,
+  'cover': instance.cover,
+  'intro': instance.intro,
+  'keywords': instance.keywords,
+  'lastupdate': instance.lastUpdate,
+  'lastupdates': instance.lastUpdates,
+  'lastvolume': instance.lastVolume,
+  'fullflag': instance.fullFlag,
+  'anime': instance.anime,
+  'original': instance.original,
+  'isvip': instance.isVip,
+  'issign': instance.isSign,
+  'rgroup': instance.rGroup,
+  'progress': instance.progress,
+  'words': instance.words,
+  'hot': instance.hot,
+  'goodnum': instance.goodNum,
+  'ratenum': instance.rateNum,
+  'ratesum': instance.rateSum,
+  'allvisit': instance.allVisit,
+  'weekvisit': instance.weekVisit,
+  'allflower': instance.allFlower,
+  'allvote': instance.allVote,
+  'dayvote': instance.dayVote,
+  'weekvote': instance.weekVote,
+  'monthvote': instance.monthVote,
+};

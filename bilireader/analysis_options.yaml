@@ -1,0 +1,39 @@
+# 靜態分析設定（規範 §8.1）。以 flutter_lints 為基線並收嚴，
+# 目標：flutter analyze 零 error/warning，info 也盡量清理。
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  errors:
+    # freezed + json_serializable 於 factory 上使用 @JsonKey 時的已知誤報，忽略。
+    invalid_annotation_target: ignore
+  exclude:
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"
+    - "build/**"
+
+linter:
+  # 逐條對齊 Effective Dart 與規範 §8.1（含 project relative import）。
+  rules:
+    - prefer_single_quotes
+    - require_trailing_commas
+    - prefer_relative_imports
+    - directives_ordering
+    - avoid_print
+    - avoid_redundant_argument_values
+    - prefer_const_constructors
+    - prefer_const_constructors_in_immutables
+    - prefer_const_declarations
+    - prefer_const_literals_to_create_immutables
+    - prefer_final_locals
+    - unnecessary_late
+    - unnecessary_parenthesis
+    - use_super_parameters
+    - sort_child_properties_last
+    - sort_constructors_first
+    - unawaited_futures
+    - always_declare_return_types
+    - cast_nullable_to_non_nullable

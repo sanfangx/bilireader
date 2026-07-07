@@ -1,0 +1,78 @@
+# macOS / editor
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Local agent / machine settings
+.claude/
+.codex/
+.agents/
+
+# Logs and temporary artifacts
+*.log
+logs/
+tmp/
+temp/
+.tmp/
+artifacts/screenshots/
+artifacts/logs/
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+coverage/
+
+# Keep generated Dart source files trackable when used by the project.
+!**/*.g.dart
+!**/*.freezed.dart
+
+# Android / Gradle
+.gradle/
+**/android/.gradle/
+**/android/local.properties
+**/android/key.properties
+**/android/app/*.jks
+**/android/app/*.keystore
+**/android/app/google-services.json
+
+# iOS / Xcode
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/ephemeral/
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/build/
+**/ios/Runner.xcworkspace/
+**/ios/Runner/GeneratedPluginRegistrant.*
+
+# Android reverse-engineering derived artifacts.
+# apk/*.apk
+# apk/*-decompiled/
+apk/
+
+# Archives / packaged outputs
+*.apk
+*.aab
+*.ipa
+*.dSYM.zip
+*.symbols
+
+# Secrets / environment
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.mobileprovision
+
+# Ignore md files excluding README.md and CHANGELOG.md
+*.md
+!README.md
+!CHANGELOG.md
