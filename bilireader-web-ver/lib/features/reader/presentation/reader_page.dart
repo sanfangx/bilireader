@@ -92,6 +92,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
 
   static final RegExp _cidRe = RegExp(r'/(\d+)(?:_\d+)?\.html');
 
+  /// 書籤/進度捲動定位（[_scrollToBlock]）逐幀逼近目標 block 的最大嘗試次數。
+  static const int _kSeekMaxTries = 12;
+
   /// 目前章可用的 URL（原始或已解析）；仍需解析時回 null。
   String? get _effectiveUrl {
     final String? u = widget.chapters[_index].url;
@@ -190,6 +193,15 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   double _fraction = 0; // 章內進度 0–1（垂直=捲動比例；分頁=頁序比例）
   double _restoreFraction = 0;
 
+  // 翻頁模式的跨模式錨點接線：blockIndex（第幾個 block）為垂直/翻頁共用、版面無關的位置錨點。
+  int _pageFirstBlock = 0; // 翻頁模式當前頁首個 block 的全域序號（由 ReaderPagedView 回報）
+  int? _restoreBlock; // 翻頁模式待跳轉的目標 block 序號
+  int _restoreSeq = 0; // 遞增即請求 ReaderPagedView 跳到 _restoreBlock 所在頁
+
+  bool get _isVertical =>
+      ref.read(readerSettingsControllerProvider).scrollMode ==
+      ReaderScrollMode.vertical;
+
   double _scrollFraction() =>
       _scroll.hasClients && _scroll.position.maxScrollExtent > 0
       ? (_scroll.offset / _scroll.position.maxScrollExtent).clamp(0.0, 1.0)
@@ -209,29 +221,41 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     if (_scroll.hasClients) _scroll.jumpTo(0);
   }
 
-  /// 目前位置的跨模式錨點：章 + 目前可見首個 block 序號 + 章內比例 + 附近繁體片段。
+  /// 目前位置的跨模式錨點：章 + 目前 block 全域序號 + 章內文字偏移 + 章內比例 + 附近繁體片段。
+  /// blockIndex 為垂直/翻頁共用、版面無關的位置錨點，故兩模式設的書籤可互通定位。
   ReaderAnchor _currentAnchor() {
     final int now = DateTime.now().millisecondsSinceEpoch;
+    final int blockIndex = _currentBlockIndex();
     return ReaderAnchor(
       articleId: widget.articleId,
       chapterId: _chapterId,
       chapterName: _chapterName,
-      sourceTextOffset: 0,
-      blockIndex: _firstVisibleBlockIndex() ?? 0,
+      sourceTextOffset: _blockSourceOffset(blockIndex),
+      blockIndex: blockIndex,
       progressInChapter: _fraction,
-      textQuote: _visibleQuote(),
+      textQuote: _quoteFromBlock(blockIndex),
       createdAt: now,
       updatedAt: now,
     );
   }
 
-  String _visibleQuote() {
-    final int? idx = _firstVisibleBlockIndex();
-    if (idx != null && idx >= 0) {
-      for (int i = idx; i < _blocks.length && i < idx + 4; i++) {
-        final String q = _blockQuoteText(_blocks[i]);
-        if (q.isNotEmpty) return q;
-      }
+  /// 目前位置的 block 全域序號——垂直＝viewport 頂端 block；翻頁＝當前頁首個 block。
+  int _currentBlockIndex() {
+    final int idx = _isVertical
+        ? (_firstVisibleBlockIndex() ?? 0)
+        : _pageFirstBlock;
+    if (_blocks.isEmpty) return 0;
+    return idx.clamp(0, _blocks.length - 1);
+  }
+
+  int _blockSourceOffset(int idx) =>
+      (idx >= 0 && idx < _blocks.length) ? _blocks[idx].sourceOffset : 0;
+
+  /// 自第 [idx] 個 block 起取第一段非空繁體片段（供書籤清單預覽 / 漂移修復）。
+  String _quoteFromBlock(int idx) {
+    for (int i = idx; i < _blocks.length && i < idx + 4; i++) {
+      final String q = _blockQuoteText(_blocks[i]);
+      if (q.isNotEmpty) return q;
     }
     return _quote;
   }
@@ -261,28 +285,82 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     return straddle ?? firstBuilt;
   }
 
-  void _scrollToBlock(int index, {double fallbackFrac = 0}) {
-    if (_scroll.hasClients &&
-        _scroll.position.maxScrollExtent > 0 &&
-        _blockCount > 0) {
-      final double est = (index / _blockCount).clamp(0.0, 1.0);
-      _scroll.jumpTo(est * _scroll.position.maxScrollExtent);
+  /// 捲動使第 [index] 個 block 對齊 viewport 頂端。`ListView.builder` 不建畫面外 block，故採
+  /// 「估算跳近 → 用已建鄰近 block 的實際位置外推修正 → 再跳」逐幀迭代（上限 [_kSeekMaxTries]），
+  /// 待目標 block 建出後以其真實 render 位置精準對齊頂端；逾時退回 [fallbackFrac] 比例。
+  ///
+  /// 取代舊「線性 index/blockCount 估算 + Scrollable.ensureVisible（對齊最近邊）」——後者對含插圖
+  /// （block 高度不均）的章節落點嚴重偏差，且目標 block 尚未 build 時落回粗略比例（跨章跳轉常停章首）。
+  void _scrollToBlock(int index, {double fallbackFrac = 0, int tries = 0}) {
+    if (!mounted) return;
+    if (!_scroll.hasClients || _scroll.position.maxScrollExtent <= 0) {
+      if (tries < _kSeekMaxTries) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scrollToBlock(index, fallbackFrac: fallbackFrac, tries: tries + 1);
+        });
+      }
+      return;
     }
-    _ensureBlockVisible(index, 0, fallbackFrac);
+    final double maxExtent = _scroll.position.maxScrollExtent;
+    final RenderObject? listRo = _listKey.currentContext?.findRenderObject();
+    if (listRo is! RenderBox || !listRo.attached) return;
+    final double viewTop = listRo.localToGlobal(Offset.zero).dy;
+
+    // 目標 block 已建出 → 用實際 render 位置把它的頂端貼齊 viewport 頂端，收工。
+    final RenderObject? targetRo =
+        _blockKeys[index]?.currentContext?.findRenderObject();
+    if (targetRo is RenderBox && targetRo.attached) {
+      final double delta = targetRo.localToGlobal(Offset.zero).dy - viewTop;
+      _scroll.jumpTo((_scroll.offset + delta).clamp(0.0, maxExtent));
+      return;
+    }
+
+    // 逾時 → 退回比例定位。
+    if (tries >= _kSeekMaxTries) {
+      if (fallbackFrac > 0) {
+        _scroll.jumpTo(fallbackFrac.clamp(0.0, 1.0) * maxExtent);
+      }
+      return;
+    }
+
+    // 尚未建出 → 以已建的最近 block 實際位置外推更準的 offset，跳近後下一幀再試。
+    _scroll.jumpTo(_estimateOffsetForBlock(index, viewTop, maxExtent, listRo));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollToBlock(index, fallbackFrac: fallbackFrac, tries: tries + 1);
+    });
   }
 
-  void _ensureBlockVisible(int index, int tries, double fallbackFrac) {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scroll.hasClients) return;
-      final BuildContext? ctx = _blockKeys[index]?.currentContext;
-      if (ctx != null) {
-        Scrollable.ensureVisible(ctx);
-      } else if (tries < 8) {
-        _ensureBlockVisible(index, tries + 1, fallbackFrac);
-      } else if (fallbackFrac > 0 && _scroll.position.maxScrollExtent > 0) {
-        _scroll.jumpTo(fallbackFrac * _scroll.position.maxScrollExtent);
+  /// 依已建 block 的實際位置外推第 [index] 個 block 應在的捲動 offset（修正插圖不均高造成的線性
+  /// 偏差）；無任何已建鄰近 block 時退回線性估算。回傳值已夾在 `[0, maxExtent]`。
+  double _estimateOffsetForBlock(
+    int index,
+    double viewTop,
+    double maxExtent,
+    RenderBox listRo,
+  ) {
+    int? nearest;
+    double nearestTopOffset = 0;
+    int bestDist = 1 << 30;
+    _blockKeys.forEach((int i, GlobalKey k) {
+      final RenderObject? ro = k.currentContext?.findRenderObject();
+      if (ro is! RenderBox || !ro.attached) return;
+      final int dist = (i - index).abs();
+      if (dist < bestDist) {
+        bestDist = dist;
+        nearest = i;
+        // 讓第 i 個 block 貼齊頂端所需的 offset。
+        nearestTopOffset =
+            _scroll.offset + (ro.localToGlobal(Offset.zero).dy - viewTop);
       }
     });
+    if (nearest == null) {
+      final double linear =
+          _blockCount > 0 ? (index / _blockCount) * maxExtent : 0.0;
+      return linear.clamp(0.0, maxExtent);
+    }
+    final double contentExtent = maxExtent + listRo.size.height;
+    final double avgH = _blockCount > 0 ? contentExtent / _blockCount : 0.0;
+    return (nearestTopOffset + (index - nearest!) * avgH).clamp(0.0, maxExtent);
   }
 
   void _saveProgressNow() {
@@ -345,16 +423,25 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     final int blockIdx = b.anchor.blockIndex;
     final double frac = b.anchor.progressInChapter;
     if (cid == _chapterId) {
-      setState(() => _fraction = _restoreFraction = frac);
-      _restoreVerticalPosition(blockIdx, frac);
+      // 同章：兩模式都以 blockIndex 定位（垂直＝捲到該 block；翻頁＝跳到該 block 所在頁）。
+      if (_isVertical) {
+        setState(() => _fraction = _restoreFraction = frac);
+        _restoreVerticalPosition(blockIdx, frac);
+      } else {
+        setState(() {
+          _fraction = _restoreFraction = frac;
+          _restoreBlock = blockIdx;
+          _restoreSeq++;
+        });
+      }
       return;
     }
-    // 異章：在攤平清單找到該 chapterId 的位置。
+    // 異章：切到該章後由 _onChapterLoaded 依 blockIndex 還原（兩模式共用）。
     final int target = widget.chapters.indexWhere(
       (Chapter c) => (int.tryParse(c.id ?? '') ?? -1) == cid,
     );
     if (target < 0) return;
-    _pendingRestoreBlockIndex = blockIdx > 0 ? blockIdx : null;
+    _pendingRestoreBlockIndex = blockIdx;
     _pendingRestoreFraction = frac;
     setState(() {
       _index = target;
@@ -373,11 +460,14 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     if (!vertical) return;
     if (blockIndex > 0) {
       _scrollToBlock(blockIndex, fallbackFrac: frac);
-    } else if (frac > 0) {
+    } else {
+      // blockIndex == 0：書籤落在章首附近的第一個 block。仍必須主動捲動定位
+      // （frac == 0 時＝回章首、frac > 0 時依比例微調），否則兩個分支都跳過、
+      // 畫面會停在原地——這正是「點章首書籤沒反應」的成因。
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scroll.hasClients && _scroll.position.maxScrollExtent > 0) {
-          _scroll.jumpTo(frac * _scroll.position.maxScrollExtent);
-        }
+        if (!mounted || !_scroll.hasClients) return;
+        final double maxExtent = _scroll.position.maxScrollExtent;
+        _scroll.jumpTo(maxExtent > 0 ? frac.clamp(0.0, 1.0) * maxExtent : 0.0);
       });
     }
   }
@@ -408,8 +498,17 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
           (sameChapter ? (saved?.anchor.progressInChapter ?? 0) : 0);
       _pendingRestoreBlockIndex = null;
       _pendingRestoreFraction = null;
-      if (mounted) setState(() => _fraction = _restoreFraction = frac);
-      _restoreVerticalPosition(blockIdx, frac);
+      // 兩模式都以 blockIndex 還原：垂直＝捲到該 block；翻頁＝請 ReaderPagedView 跳到其所在頁。
+      if (_isVertical) {
+        if (mounted) setState(() => _fraction = _restoreFraction = frac);
+        _restoreVerticalPosition(blockIdx, frac);
+      } else if (mounted) {
+        setState(() {
+          _fraction = _restoreFraction = frac;
+          _restoreBlock = blockIdx;
+          _restoreSeq++;
+        });
+      }
     }
     _saveProgressNow();
   }
@@ -570,6 +669,9 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
         settings: settings,
         pageCurl: settings.scrollMode == ReaderScrollMode.pageCurl,
         initialFraction: _restoreFraction,
+        restoreBlockIndex: _restoreBlock,
+        restoreSeq: _restoreSeq,
+        onFirstBlockIndex: (int i) => _pageFirstBlock = i,
         onFraction: (double f) {
           setState(() => _fraction = f);
           _saveProgressNow();

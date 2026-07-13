@@ -4,7 +4,7 @@ import 'dart:collection';
 /// 全域出站請求限流器（單例）。所有走 dio 的 tw.linovelib.com 請求都經過它，
 /// 以最小間隔 [gap] 序列化派發（FIFO），避免高頻突刺觸發 Cloudflare 限流。
 ///
-/// 設計取捨（詳見開發策略.md x-arch）：
+/// 設計取捨：
 /// - **Completer 喚醒排隊者，非忙等輪詢**（比參考專案 bili_novel_packer 的
 ///   Scheduler 1ms busy-wait 省電）。
 /// - gap 預設偏「**互動友善**」而非參考專案的批次下載速率（15/分＝4 秒）——單一

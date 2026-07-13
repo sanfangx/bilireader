@@ -20,7 +20,10 @@ class ReaderPagedView extends StatefulWidget {
     required this.settings,
     required this.pageCurl,
     required this.onFraction,
+    this.onFirstBlockIndex,
     this.initialFraction = 0,
+    this.restoreBlockIndex,
+    this.restoreSeq = 0,
     super.key,
   });
 
@@ -29,7 +32,15 @@ class ReaderPagedView extends StatefulWidget {
   final ReaderSettings settings;
   final bool pageCurl;
   final ValueChanged<double> onFraction;
+
+  /// 頁變動時回報「當前頁首個 block 的全域序號」，作為跨模式（垂直/翻頁）共用的書籤/進度錨點。
+  final ValueChanged<int>? onFirstBlockIndex;
   final double initialFraction;
+
+  /// 還原/跳轉目標 block 全域序號；每次 [restoreSeq] 遞增即跳到該 block 所在頁。以 block 序號
+  /// （版面無關）定位，達成與垂直捲動模式的書籤互通。
+  final int? restoreBlockIndex;
+  final int restoreSeq;
 
   @override
   State<ReaderPagedView> createState() => _ReaderPagedViewState();
@@ -45,10 +56,12 @@ class _ReaderPagedViewState extends State<ReaderPagedView> {
 
   Object? _key;
   List<List<ReaderBlock>> _pages = <List<ReaderBlock>>[];
+  List<int> _pageStart = <int>[]; // _pageStart[i] = 第 i 頁首個 block 的全域序號（前綴和）
   PageController? _pageController;
   final PageCurlController _curlController = PageCurlController();
   bool _appliedInitial = false;
   late double _liveFraction = widget.initialFraction; // 目前頁比例（重分頁時保位）
+  late int _appliedRestoreSeq = widget.restoreSeq; // 已套用的還原序號（避免重覆/模式切換誤跳）
 
   @override
   void dispose() {
@@ -60,19 +73,32 @@ class _ReaderPagedViewState extends State<ReaderPagedView> {
   @override
   void didUpdateWidget(ReaderPagedView old) {
     super.didUpdateWidget(old);
-    // 還原進度於章載入後（async）才到達；initialFraction 改變 → 同步跳至目標頁。
-    if (widget.initialFraction != old.initialFraction) {
-      _liveFraction = widget.initialFraction;
-      _seekToFraction(_liveFraction);
+    // 書籤/跳轉：restoreSeq 遞增 → 跳到目標 block 所在頁（版面無關定位；同章 pages 已存在）。
+    if (widget.restoreSeq != old.restoreSeq && widget.restoreBlockIndex != null) {
+      _appliedRestoreSeq = widget.restoreSeq;
+      final int page = _pageOfBlock(widget.restoreBlockIndex!);
+      _liveFraction = _pages.length <= 1 ? 0 : page / (_pages.length - 1);
+      _seekToPage(page);
     }
   }
 
-  void _seekToFraction(double frac) {
+  /// 全域 block 序號 → 所在頁序（[_pageStart] 遞增，取最後一個起點 ≤ blockIndex 的頁）。
+  int _pageOfBlock(int blockIndex) {
+    if (_pageStart.isEmpty) return 0;
+    int page = 0;
+    for (int i = 0; i < _pageStart.length; i++) {
+      if (_pageStart[i] <= blockIndex) {
+        page = i;
+      } else {
+        break;
+      }
+    }
+    return page.clamp(0, _pages.length - 1);
+  }
+
+  void _seekToPage(int page) {
     if (_pages.length <= 1) return;
-    final int target = (frac * (_pages.length - 1)).round().clamp(
-      0,
-      _pages.length - 1,
-    );
+    final int target = page.clamp(0, _pages.length - 1);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       if (widget.pageCurl) {
@@ -106,11 +132,27 @@ class _ReaderPagedViewState extends State<ReaderPagedView> {
     );
     _pages = _paginator.paginate(widget.blocks, m);
     if (_pages.isEmpty) _pages = <List<ReaderBlock>>[widget.blocks];
-    // 以「目前頁比例」定位，重分頁（字級/尺寸變更）時保住當前閱讀位置。
-    final int initial = (_liveFraction * (_pages.length - 1)).round().clamp(
-      0,
-      _pages.length - 1,
-    );
+    // 每頁首個 block 的全域序號前綴和（跨模式錨點 blockIndex ↔ 頁序 的換算依據）。
+    _pageStart = <int>[];
+    int acc = 0;
+    for (final List<ReaderBlock> p in _pages) {
+      _pageStart.add(acc);
+      acc += p.length;
+    }
+    // 有未套用的還原目標（書籤/進度）→ 跳到該 block 所在頁；否則以「目前頁比例」保住當前閱讀
+    // 位置（字級/尺寸變更重分頁時）。
+    final int initial;
+    if (widget.restoreBlockIndex != null &&
+        widget.restoreSeq != _appliedRestoreSeq) {
+      _appliedRestoreSeq = widget.restoreSeq;
+      initial = _pageOfBlock(widget.restoreBlockIndex!);
+      _liveFraction = _pages.length <= 1 ? 0 : initial / (_pages.length - 1);
+    } else {
+      initial = (_liveFraction * (_pages.length - 1)).round().clamp(
+        0,
+        _pages.length - 1,
+      );
+    }
     _pageController?.dispose();
     _pageController = PageController(initialPage: initial);
     _appliedInitial = false;
@@ -126,6 +168,10 @@ class _ReaderPagedViewState extends State<ReaderPagedView> {
 
   void _onPage(int index) {
     final int count = _pages.length;
+    // 先回報 blockIndex（讓上層在 onFraction 觸發存檔前已取到最新頁首 block），再回報頁比例。
+    if (index >= 0 && index < _pageStart.length) {
+      widget.onFirstBlockIndex?.call(_pageStart[index]);
+    }
     _liveFraction = count <= 1 ? 0 : index / (count - 1);
     widget.onFraction(_liveFraction);
   }
