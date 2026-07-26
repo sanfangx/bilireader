@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/models/novel_summary.dart';
 import '../../core/network/linovelib_api.dart';
@@ -6,6 +7,7 @@ import '../../core/offline/offline_store.dart';
 import '../../core/reading/local_store.dart';
 import '../../core/session/auth_controller.dart';
 import '../../core/session/shelf_events.dart';
+import '../../core/storage/database/database_providers.dart';
 import '../../theme/app_colors.dart';
 import '../../theme/app_text.dart';
 import '../../widgets/network_cover.dart';
@@ -15,14 +17,14 @@ import '../download/download_manager_page.dart';
 /// 我的 — 個人中心。對齊設計稿 Profile：頭像 + 統計 + 功能選單。
 /// 身分（頭像/ID/暱稱/等級）登入後由 `/user.php` 解析（見 applyProfile）；
 /// 抓不到暱稱時退回「書友」。統計為本機（收藏/閱讀中/已下載）。
-class AccountPage extends StatefulWidget {
+class AccountPage extends ConsumerStatefulWidget {
   const AccountPage({super.key});
 
   @override
-  State<AccountPage> createState() => _AccountPageState();
+  ConsumerState<AccountPage> createState() => _AccountPageState();
 }
 
-class _AccountPageState extends State<AccountPage> {
+class _AccountPageState extends ConsumerState<AccountPage> {
   late Future<List<NovelSummary>> _bookcase;
 
   @override
@@ -51,7 +53,15 @@ class _AccountPageState extends State<AccountPage> {
   }
 
   void _reloadBookcase() {
-    if (mounted) setState(() => _bookcase = LinovelibApi.instance.bookcase());
+    if (!mounted) return;
+    // ⚠️ 必須用「區塊主體」而非箭頭：`bookcase()` 回傳 Future，箭頭主體會把它當成
+    // 閉包的回傳值交給 setState，觸發框架斷言「setState() callback argument returned
+    // a Future.」（與誤寫 `setState(() async {...})` 是同一個斷言）。登入完成時
+    // `AuthController.applyProfile` → notifyListeners → 此處，必現。
+    // 靜態分析看不出來，只有實跑才會現形。
+    setState(() {
+      _bookcase = LinovelibApi.instance.bookcase();
+    });
   }
 
   @override
@@ -170,6 +180,7 @@ class _AccountPageState extends State<AccountPage> {
               () => Navigator.of(context).push(MaterialPageRoute(
                   builder: (_) => const DownloadManagerPage()))),
           _menu('◔', '消息通知', () => _toast('消息中心開發中')),
+          _menu('⟳', '清除章節快取', _clearChapterCache),
           _menu('⚙', '設定', _openSettings),
         ],
       ),
@@ -215,6 +226,44 @@ class _AccountPageState extends State<AccountPage> {
 
   void _toast(String m) =>
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+
+  /// 清空章節正文快取（自救入口）。
+  ///
+  /// 章節正文是永久快取，靜默腐化（站方段落打亂未還原、或站方送出截斷正文）一旦寫入
+  /// 就會固化，重開 App 也不會消失。沒有這個入口的話使用者完全無法自救。
+  Future<void> _clearChapterCache() async {
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        backgroundColor: AppColors.surf,
+        title: Text('清除章節快取',
+            style: AppText.serif(size: 16, color: AppColors.txt)),
+        content: Text(
+          '會刪除已快取的章節正文，下次開啟章節重新擷取。\n'
+          '若曾看到內容順序錯亂或內容殘缺，清除後即可修正。\n'
+          '（已下載的離線書不受影響，需在「下載管理」重新下載）',
+          style: AppText.sans(size: 12.5, color: AppColors.mut, height: 1.6),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('取消',
+                style: AppText.sans(size: 13, color: AppColors.mut)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('清除',
+                style: AppText.sans(
+                    size: 13, weight: FontWeight.w700, color: AppColors.acc)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    final int n = await ref.read(chapterCacheDaoProvider).clearChapterContents();
+    if (!mounted) return;
+    _toast('已清除 $n 章快取');
+  }
 
   void _openSettings() {
     showModalBottomSheet(

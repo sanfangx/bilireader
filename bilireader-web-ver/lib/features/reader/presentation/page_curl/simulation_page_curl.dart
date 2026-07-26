@@ -117,6 +117,19 @@ class _SimulationPageCurlState extends State<SimulationPageCurl>
       old.controller?._detach(this);
       widget.controller?._attach(this);
     }
+    // 頁數變動（字級／行距／邊界變更或旋轉造成重新分頁）時必須立刻夾住 _index：
+    // 緊接著的 build 會無條件以 `_boundary(_curKey, _index)` 呼叫 itemBuilder，
+    // 頁數變少而 _index 未夾就是索引越界崩潰。上層雖然也會 jumpTo 定位，但那排在
+    // addPostFrameCallback 裡，比這一幀的 build 晚——來不及。
+    if (widget.itemCount != old.itemCount) {
+      final int last = widget.itemCount > 0 ? widget.itemCount - 1 : 0;
+      if (_index > last) {
+        _index = last;
+        // 只同步 controller（保持外部可見狀態一致），不呼叫 onIndexChanged：
+        // 重新分頁不是使用者翻頁，不應被上層當成閱讀位置變更而寫進進度。
+        widget.controller?._sync(_index);
+      }
+    }
   }
 
   @override

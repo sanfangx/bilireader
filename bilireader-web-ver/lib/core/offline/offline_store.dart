@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../features/reader/chapter_extractor.dart';
 import '../../features/reader/content_block.dart';
+import '../../features/reader/data/chapter_text_assembler.dart' show looksTruncated;
 import '../app_config.dart';
 import '../models/catalog.dart';
 import '../network/api_client.dart';
@@ -168,7 +169,16 @@ class OfflineStore extends ChangeNotifier {
 
   Future<void> init() async {
     final docs = await getApplicationDocumentsDirectory();
-    _root = Directory('${docs.path}/offline');
+    await _initAt(Directory('${docs.path}/offline'));
+  }
+
+  /// 測試用注入口：直接指定離線根目錄（正式路徑由 [init] 向 path_provider 取得）。
+  /// 與倉儲層 `offlineLookup` / `clockMs` 同樣的注入慣例，避免測試綁死平台通道。
+  @visibleForTesting
+  Future<void> initAtForTest(Directory root) => _initAt(root);
+
+  Future<void> _initAt(Directory root) async {
+    _root = root;
     await _root!.create(recursive: true);
     for (final e in _root!.listSync()) {
       if (e is Directory) {
@@ -265,9 +275,50 @@ class OfflineStore extends ChangeNotifier {
       if (cid == null || int.tryParse(cid) != chapterId) continue;
       final blocks = await readChapter(m.novelId, meta.index);
       if (blocks == null || blocks.isEmpty) return null;
-      return ChapterContent(title: meta.title, blocks: blocks);
+      final content = ChapterContent(title: meta.title, blocks: blocks);
+      // **自癒**：截斷閘門上線前下載的離線檔仍是殘缺的，而讀取端一律拒用 →
+      // 那些章會永遠停在「顯示已下載、離線打不開」，且沒有任何入口能修。
+      // 命中即就地作廢（標回未完成 + 刪內容檔），下次「繼續下載」就會重抓這一章。
+      //
+      // 回 null 而非拋例外：讓倉儲照常往下走 drift/線上路徑——閱讀權不受影響
+      // （線上若同樣拿到截斷版，仍會由倉儲帶出 partial 供使用者選擇「仍要閱讀」）。
+      if (looksTruncated(content)) {
+        await _invalidateChapter(m.novelId, meta.index);
+        return null;
+      }
+      return content;
     }
     return null;
+  }
+
+  /// 把某章標回「未完成」並刪掉其內容檔（供 [contentFor] 的截斷自癒）。
+  /// 只動這一章：其餘已完成章節不受影響，重試時不會重下。
+  Future<void> _invalidateChapter(String novelId, int index) async {
+    final m = _manifests[novelId];
+    if (m == null || _root == null) return;
+    final chapters = m.chapters
+        .map((c) => c.index == index
+            ? OfflineChapterMeta(c.index, c.title, false, c.url, c.vip,
+                vol: c.vol)
+            : c)
+        .toList();
+    final updated = OfflineManifest(
+      novelId: m.novelId,
+      title: m.title,
+      coverUrl: m.coverUrl,
+      chapters: chapters,
+      // 已不完整 → 狀態退回 paused，離線書庫/下載管理才看得出「需要繼續下載」。
+      updatedAt: DateTime.now().millisecondsSinceEpoch,
+      status: OfflineStatus.paused,
+    );
+    _manifests[novelId] = updated;
+    try {
+      await File('${_root!.path}/$novelId/manifest.json')
+          .writeAsString(jsonEncode(updated.toJson()));
+      final f = File('${_root!.path}/$novelId/ch_$index.json');
+      if (f.existsSync()) await f.delete();
+    } catch (_) {}
+    notifyListeners();
   }
 
   // ---- 下載控制 ----
@@ -472,6 +523,13 @@ class OfflineStore extends ChangeNotifier {
         if (url == null) throw Exception('unresolved-url');
         final content = await ChapterExtractor().load(url);
         if (content.blocks.isEmpty) throw Exception('empty-content');
+        // 站方對「不受信任的用戶端」只回約 1/3 正文（見 looksTruncated）。離線檔是**永久**的，
+        // 而讀取端（ChapterTextRepository）會拒用截斷的離線檔 → 這裡若放行，使用者會拿到
+        // 一本「顯示已下載、離線卻一章都打不開」的書，且毫無徵兆。
+        //
+        // 故明確失敗：不寫檔、不標 ok → 計入 failed，整本結束時標為需重試，
+        // 這一章留待「繼續下載」重抓（已成功的章不受影響、不會重下）。
+        if (looksTruncated(content)) throw Exception('truncated-content');
         final out = <Map<String, String>>[];
         int imgN = 0;
         for (final b in content.blocks) {
@@ -509,9 +567,11 @@ class OfflineStore extends ChangeNotifier {
       notifyListeners();
     }
 
-    // 一章都沒成功（整本失敗）→ 標 error 保留於任務列可重試，不靜默當 done 消失、
-    // 不在離線書庫留一本 0 章空書（M10）。
-    if (task.done == 0 && task.total > 0) {
+    // 有任何一章沒抓成功 → **不標 done**。標 done 等於宣告「這本已完整可離線閱讀」，
+    // 但缺章的書離線讀到那一章就是死路，而且使用者完全不會知道。
+    // 標為 error + 保留可續傳狀態：UI 顯示失敗並提供重試，「繼續下載」只重抓失敗的章。
+    // （原本只在 done==0 時才標 error，缺一章與缺全部的差別只是程度，症狀是同一個。）
+    if (task.failed > 0 || (task.done == 0 && task.total > 0)) {
       task.status = DlStatus.error;
       await persist(OfflineStatus.paused); // 保留可續傳狀態（非 done）
     } else {

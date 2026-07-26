@@ -100,6 +100,14 @@ class ChapterCacheDao extends DatabaseAccessor<AppDatabase>
         .go();
   }
 
+  /// 清空所有已快取章節正文，回傳刪除筆數。
+  ///
+  /// 復原用途：章節正文是**永久**快取，一旦存進殘缺/亂序內容，之後每次開都是壞的，
+  /// 而且沒有任何錯誤徵兆。兩種已知的靜默腐化來源——站方段落打亂在擷取當下尚未還原
+  /// （見 `ChapterExtractor` 的順序完整性註解）、以及站方送出截斷正文（見
+  /// `containsTruncationMarker`）——修好偵測後既有的壞快取仍在，需要一鍵清除讓它重抓。
+  Future<int> clearChapterContents() => delete(chapterContents).go();
+
   Future<ChapterCatalogRow?> getCatalog(int articleId) async {
     if (articleId <= 0) {
       return null;

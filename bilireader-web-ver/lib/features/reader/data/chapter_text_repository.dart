@@ -26,6 +26,37 @@ class ChapterUnavailableException implements Exception {
       'ChapterUnavailableException($articleId:$chapterId, $reason)';
 }
 
+/// 站方只送出**截斷**的正文（約 1/3 段落 + 「內容加載失敗」標記）。**不寫入快取**。
+///
+/// 觸發條件是「請求不受站方信任」。2026-07-25 逐項實測**排除**了：UA（行動/桌機/iPhone）、
+/// Referer、Accept 三件組、Sec-Fetch、HTTP/1.1 vs 2、以及 **cookie 整體**——同一個 Chrome
+/// 用 `credentials:'omit'`（完全不送 cookie，故也不送 cf_clearance）照樣拿到完整內容。
+/// 剩下的分野是**用戶端指紋**（TLS/JA3、HTTP2 設定、header 順序）。
+/// 故：重試同一個用戶端多半無效，補 cookie 也無效；真 WebView 才是可行路徑。
+///
+/// **這個例外只代表「不可信任到足以永久保存」，不代表「不可閱讀」**：截斷的那 1/3 是
+/// 真實正文，讀一部分遠好過完全讀不到。故一併帶出 [partial] 供展示層在使用者**明確
+/// 選擇**後渲染（僅此一次、不落快取）。若不帶出，站方的一串字就等同於封鎖章節——那正是
+/// convention「Never pre-block chapters based on HTML markers」明令禁止的失敗模式。
+class ChapterContentTruncatedException implements Exception {
+  const ChapterContentTruncatedException(
+    this.articleId,
+    this.chapterId,
+    this.partial,
+  );
+
+  final int articleId;
+  final int chapterId;
+
+  /// 已擷取到的（不完整）正文。展示層可據此提供「仍要閱讀」的降級路徑。
+  final ChapterText partial;
+
+  @override
+  String toString() =>
+      'ChapterContentTruncatedException($articleId:$chapterId, '
+      'partialBlocks=${partial.text.length})';
+}
+
 /// web 版章節正文倉儲。忠實對映 api-ver `ChapterTextRepositoryImpl`：
 /// drift `ChapterContents` 永久快取優先（§7.5），未命中才用 [ChapterContentSource] 擷取並
 /// 寫回；in-flight dedupe 合併同章並發。**快取存合成後整章 HTML**（OpenCC 不適用 tw 站）。
@@ -99,7 +130,10 @@ class ChapterTextRepository {
       articleId,
       chapterId,
     );
-    if (offline != null && hasRenderableContent(offline)) {
+    // 截斷的離線檔（在偵測上線前下載的）不可用 → 略過，改走快取/線上重抓。
+    if (offline != null &&
+        hasRenderableContent(offline) &&
+        !looksTruncated(offline)) {
       return _assembler.assemble(
         articleId: articleId,
         chapterId: chapterId,
@@ -113,7 +147,18 @@ class ChapterTextRepository {
       chapterId,
     );
     if (row != null) {
-      return _decode(articleId, chapterId, row.payload);
+      // **自癒**：偵測上線前存下的截斷內容已固化在快取裡，使用者重開多少次都是殘缺的。
+      // 命中即就地刪除並改走線上重抓，不必等使用者自己去清整個快取。
+      //
+      // 判定必須用與寫入端**相同**的「只認終端」語意（見 assembledTailLooksTruncated）：
+      // 若改成掃整份 payload，中段帶標記的章節會寫得進去卻讀不出來 → 每次開啟都刪快取
+      // 重抓，永遠命不中；且掃 payload 連 chapterName 都算，誤判面更大。
+      final ChapterText cached = _decode(articleId, chapterId, row.payload);
+      if (assembledTailLooksTruncated(cached.text)) {
+        await _cacheDao.deleteChapterContent(articleId, chapterId);
+      } else {
+        return cached;
+      }
     }
     final ChapterContent content = await _source.load(url);
     if (!hasRenderableContent(content)) {
@@ -125,6 +170,12 @@ class ChapterTextRepository {
       chapterName: chapterName,
       content: content,
     );
+    // 「非空」不等於「完整」：截斷版帶著數十段真內文，會通過上面的空內容檢查。
+    // 必須在 saveChapterContent 之前擋掉，否則殘缺內容永久固化。
+    // 但**照樣把已擷取的部分交出去**——擋的是快取，不是使用者的閱讀權（見例外註解）。
+    if (looksTruncated(content)) {
+      throw ChapterContentTruncatedException(articleId, chapterId, text);
+    }
     await _cacheDao.saveChapterContent(
       articleId: articleId,
       chapterId: chapterId,

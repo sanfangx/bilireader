@@ -198,8 +198,63 @@ class ReaderInlineParser {
 
   int _findTagEnd(String s, int i) => s.indexOf('>', i + 1);
 
-  int _findClosingTag(String s, String name, int from) =>
-      _indexOfCI(s, '</$name>', from);
+  /// 找出與呼叫端剛開啟的那個 `<name>` **配對**的 `</name>` 位置（-1＝找不到）。
+  ///
+  /// 坑：原本直接取「第一個 `</name>`」，完全沒有深度計數。站方正文常見同名巢狀
+  /// （`<span class="heimu">…<span>…</span>…</span>`），取第一個等於讓外層提早收尾：
+  /// 外層剩下的內容會掉到 [HeimuRun] **之外** → **黑幕（劇透遮罩）失效、劇透以明文顯示**；
+  /// 反向巢狀（外層普通 span、內層才是 heimu）則會讓內層整個被當成未閉合而丟掉樣式，
+  /// 同樣把劇透攤開。兩種情況畫面上都看不出是 bug，只是「這段沒有被遮住」。
+  ///
+  /// 結束標籤刻意只認**精確**的 `</name>`（與原本的比對方式一致）：呼叫端是以
+  /// `close + name.length + 3` 推算續掃位置，若放寬成 `</name >` 之類，該算式會落在
+  /// 標籤內部，反而把殘餘的 `>` 當成正文輸出。
+  int _findClosingTag(String s, String name, int from) {
+    final String closing = '</$name>';
+    int depth = 0;
+    int i = from;
+    while (i < s.length) {
+      final int lt = s.indexOf('<', i);
+      if (lt < 0) return -1;
+      final int gt = _findTagEnd(s, lt);
+      if (gt < 0) return -1;
+      if (_matchesAt(s, lt, closing)) {
+        if (depth == 0) return lt;
+        depth--;
+      } else if (_isOpeningTagAt(s, lt, gt, name)) {
+        depth++;
+      }
+      i = gt + 1;
+    }
+    return -1;
+  }
+
+  /// `s[lt..gt]` 是否為 `<name ...>` 這種**開始**標籤
+  /// （`</name>` 不算；自閉合 `<name/>` 也不算——它沒有對應的結束標籤）。
+  bool _isOpeningTagAt(String s, int lt, int gt, String name) {
+    int k = lt + 1;
+    while (k <= gt && s[k].trim().isEmpty) {
+      k++;
+    }
+    if (k > gt || s[k] == '/') return false;
+    if (!_matchesAt(s, k, name)) return false;
+    final int end = k + name.length;
+    if (end > gt) return false;
+    final String c = s[end];
+    if (!(c == '>' || c == '/' || c.trim().isEmpty)) return false;
+    return s[gt - 1] != '/';
+  }
+
+  /// 在固定位置做 ASCII 大小寫不敏感比對（[lowerNeedle] 須為小寫）。
+  bool _matchesAt(String s, int at, String lowerNeedle) {
+    if (at + lowerNeedle.length > s.length) return false;
+    for (int j = 0; j < lowerNeedle.length; j++) {
+      int ch = s.codeUnitAt(at + j);
+      if (ch >= 0x41 && ch <= 0x5A) ch += 0x20; // A-Z → a-z
+      if (ch != lowerNeedle.codeUnitAt(j)) return false;
+    }
+    return true;
+  }
 
   bool _isTag(String tag, String name) {
     int start = 0;

@@ -13,6 +13,17 @@ import 'api_client.dart';
 import 'auth_interceptor.dart';
 import 'cf_signals.dart';
 
+/// 目錄頁抓到了，但**不是一份目錄**（限流頁／CF 挑戰頁／站方改版）。
+///
+/// 存在的意義是把「錯誤」與「這本書沒有章節」分開。回空目錄會讓下游把失敗當成合法值：
+/// 書架續讀曾因此 `clamp(0, -1)` 拋 ArgumentError 並 pop 掉 AppShell 根路由（黑畫面），
+/// 整本下載則產生 0 章空書——兩者都毫無徵兆。
+class CatalogUnavailableException implements Exception {
+  const CatalogUnavailableException();
+  @override
+  String toString() => 'CatalogUnavailableException（目錄頁無 .volume-chapters 容器）';
+}
+
 /// linovelib 內容 API（探索/列表頁皆為開放 HTML，dio 直抓 + 解析）。
 /// 注意：章節「內文」之後改用 WebView 渲染擷取（處理段落打亂），此處只做列表/詳情。
 class LinovelibApi {
@@ -73,6 +84,9 @@ class LinovelibApi {
   /// 書籍詳情：/novel/{id}.html
   Future<NovelDetail> novelDetail(String id) async {
     final res = await _dio.get<String>('/novel/$id.html');
+    // 少了這道，限流／CF 頁會解析成「每個欄位都是空字串」的詳情，畫面看起來像
+    // 一本沒有書名沒有簡介的書，而不是一次可重試的失敗。
+    _assertListable(res);
     final doc = html_parser.parse(res.data ?? '');
     final img = doc.querySelector('.book-layout img');
     final metas = doc.querySelectorAll('.book-meta');
@@ -126,7 +140,25 @@ class LinovelibApi {
   /// 目錄：/novel/{id}/catalog
   Future<Catalog> catalog(String id) async {
     final res = await _dio.get<String>('/novel/$id/catalog');
-    final doc = html_parser.parse(res.data ?? '');
+    _assertListable(res);
+    return parseCatalog(res.data ?? '');
+  }
+
+  /// 目錄頁 HTML → [Catalog]（純函式，供測試；與 [parseReviewList] 等同慣例）。
+  ///
+  /// **拿不到目錄容器時拋例外，而不是回空目錄**：站方限流/CF 挑戰頁同樣是合法 HTML，
+  /// 解析不到 `.volume-chapters` 就回「空目錄」等於把**錯誤偽裝成沒有資料**，
+  /// 而下游全都把空目錄當合法值處理——書架續讀曾因此 `clamp(0, -1)` 拋 ArgumentError
+  /// 並把 AppShell 根路由 pop 掉（黑畫面），下載則產生 0 章空書。
+  ///
+  /// 容器存在但沒有章節 → 照常回空目錄（那才是「這本真的還沒有章節」）。
+  /// 取捨：若站方改版換掉此 class，會變成每次都「目錄載入失敗」而非靜默空目錄——
+  /// 刻意選擇**大聲失敗**，靜默的空目錄正是本專案吃過大虧的失敗模式。
+  static Catalog parseCatalog(String html) {
+    final doc = html_parser.parse(html);
+    if (doc.querySelector('.volume-chapters') == null) {
+      throw const CatalogUnavailableException();
+    }
     final volumes = <Volume>[];
     Volume? current;
 
@@ -158,6 +190,9 @@ class LinovelibApi {
   /// 每頁約 30 則；回傳空清單表示無更多（供分頁停止）。
   Future<List<BookReview>> reviews(String novelId, {int page = 1}) async {
     final res = await _dio.get<String>('/reviews_${novelId}_$page.html');
+    // 少了這道，429／CF 頁會被解析成空清單，而呼叫端把「空頁」當成「已到底」
+    // → 永久停止分頁，且使用者看不出是失敗（錯誤被偽裝成沒有資料）。
+    _assertListable(res);
     return parseReviewList(res.data ?? '');
   }
 
@@ -165,15 +200,16 @@ class LinovelibApi {
   Future<List<Topic>> topics({int page = 1}) async {
     final path = page <= 1 ? '/alltopics' : '/alltopics_$page';
     final res = await _dio.get<String>(path);
+    _assertListable(res); // 同 reviews：空頁 ≠ 到底（見該處註解）
     return parseTopicList(res.data ?? '');
   }
 
-  Volume _ensureVolume(List<Volume> volumes) {
+  static Volume _ensureVolume(List<Volume> volumes) {
     if (volumes.isEmpty) volumes.add(Volume(name: ''));
     return volumes.last;
   }
 
-  bool _isVipChapter(dom.Element li) {
+  static bool _isVipChapter(dom.Element li) {
     if (RegExp(r'\bvip\b', caseSensitive: false).hasMatch(li.className)) {
       return true;
     }
@@ -247,6 +283,10 @@ class LinovelibApi {
         '_': DateTime.now().millisecondsSinceEpoch,
       },
     );
+    // 少了這道，限流／CF 頁會解析成空清單 → 書架顯示「空空如也」，**而且那個空清單
+    // 會被寫進分組快取覆蓋掉原本正確的資料**。空書架是合法狀態（故不另做結構檢查），
+    // 但「抓失敗」必須與「真的沒有收藏」分得開。
+    _assertListable(res);
     final doc = html_parser.parse(res.data ?? '');
     final out = <NovelSummary>[];
     final seen = <String>{};

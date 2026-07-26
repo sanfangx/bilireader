@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 /// 本機閱讀進度。
@@ -111,6 +112,32 @@ class LocalStore extends ChangeNotifier {
   bool _loaded = false;
 
   bool get loaded => _loaded;
+
+  /// 通知監聽者——**若目前所處的幀階段會讓 widget 樹被鎖定，則延到本幀結束後再通知**。
+  ///
+  /// 坑：`ReaderPage.dispose()` 會 flush 最後一筆進度（→ [saveProgress] → notifyListeners），
+  /// 而 element 的 dispose 跑在 `BuildOwner.finalizeTree` 的 `lockState` 內。此時任何
+  /// `setState` / `markNeedsBuild` 都會被框架擋下並拋
+  /// 「setState() or markNeedsBuild() called when widget tree was locked」。後果有兩個：
+  /// (1) console 每次離開閱讀器都噴例外；
+  /// (2) **更實際的傷害**——書架「繼續閱讀」與目錄「閱讀中」標記那些 `ListenableBuilder`
+  ///     根本收不到這次更新，返回後畫面停在舊進度（它們正是靠監聽本 store 才即時更新的）。
+  ///
+  /// 修法是延到 post-frame callback：`finalizeTree` 屬於 `drawFrame` 的一部分，post-frame
+  /// callback 在 `drawFrame` 之後才跑，那時樹已解鎖，監聽者照常於下一幀重建。
+  /// 非幀期間的呼叫（捲動防抖存檔、App 進背景 flush、加/刪書籤）行為完全不變。
+  @override
+  void notifyListeners() {
+    final SchedulerPhase phase = SchedulerBinding.instance.schedulerPhase;
+    if (phase == SchedulerPhase.persistentCallbacks ||
+        phase == SchedulerPhase.midFrameMicrotasks) {
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        super.notifyListeners();
+      });
+      return;
+    }
+    super.notifyListeners();
+  }
 
   Future<void> load() async {
     if (_loaded) return;

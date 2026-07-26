@@ -34,58 +34,77 @@ class ReaderPaginator {
   List<List<ReaderBlock>> paginate(
     List<ReaderBlock> blocks,
     ReaderLayoutMetrics m,
-  ) {
-    if (blocks.isEmpty) return <List<ReaderBlock>>[];
+  ) => paginateIndexed(blocks, m).pages;
+
+  /// 分頁，並一併回傳 **每頁首個 block 對應的「原始 [blocks] 索引」**。
+  ///
+  /// 為什麼需要這個：長段會被 [_splitTextEntity] / [_splitTextByLines] 切成多個
+  /// `ParagraphBlock`，所以「分頁後的 block 數」比原始多，兩者的索引空間**不一致**。
+  /// 展示層若用「逐頁累加分頁後 block 數」當前綴和（舊作法），算出來的 blockIndex 會隨
+  /// 切分次數單調偏移，而那個數字正是跨模式（垂直↔翻頁）共用的書籤/進度錨點
+  /// ——偏移的結果是「翻頁模式存的位置，回到捲動模式還原時越跑越後面」。
+  /// 故索引必須在分頁當下就記錄，而不是事後從結果推算。
+  ///
+  /// 同一個 block 跨多頁時，這幾頁的起始索引會是**同一個值**（重複），這是正確的：
+  /// 它們的頁首確實都落在同一個原始 block 內。
+  ({List<List<ReaderBlock>> pages, List<int> pageStartOriginIndex})
+  paginateIndexed(List<ReaderBlock> blocks, ReaderLayoutMetrics m) {
+    if (blocks.isEmpty) {
+      return (pages: <List<ReaderBlock>>[], pageStartOriginIndex: <int>[]);
+    }
     final _Packer pk = _Packer(m.availableHeight < 1 ? 1 : m.availableHeight);
 
-    for (final ReaderBlock b in blocks) {
+    for (int i = 0; i < blocks.length; i++) {
+      final ReaderBlock b = blocks[i];
       switch (b) {
         case AdBlock():
         case ReaderEndBlock():
         case ChapterCommentBlock():
         case ImageBlock():
-          pk.ownPage(b);
+          pk.ownPage(b, i);
         case ChapterTitleBlock():
           pk.flush();
-          pk.add(b, _estimate(b, m, includeBottom: true));
+          pk.add(b, _estimate(b, m, includeBottom: true), i);
         case final ParagraphBlock p:
           final double est = _estimate(p, m, includeBottom: true);
           if (pk.remaining >= est) {
-            pk.add(p, est);
+            pk.add(p, est, i);
           } else if (pk.cur.isEmpty) {
             final List<ParagraphBlock> parts = _splitTextEntity(p, pk.avail, m);
             if (parts.isEmpty) {
-              pk.add(p, est);
+              pk.add(p, est, i);
             } else {
-              _addParts(pk, parts, m);
+              _addParts(pk, parts, m, i);
             }
           } else {
             final (ParagraphBlock? first, ParagraphBlock? second) =
                 _splitTextByLines(p, pk.remaining, m);
             if (first != null) {
-              pk.add(first, _estimate(first, m, includeBottom: false));
+              pk.add(first, _estimate(first, m, includeBottom: false), i);
             }
             pk.flush();
             if (second != null) {
               final double est2 = _estimate(second, m, includeBottom: true);
               if (est2 > pk.avail) {
-                _addParts(pk, _splitTextEntity(second, pk.avail, m), m);
+                _addParts(pk, _splitTextEntity(second, pk.avail, m), m, i);
               } else {
-                pk.add(second, est2);
+                pk.add(second, est2, i);
               }
             }
           }
       }
     }
     pk.flush();
-    return pk.pages;
+    return (pages: pk.pages, pageStartOriginIndex: pk.pageOrigins);
   }
 
   /// `paginate$addTextPartsToPages`：逐 part 裝箱，溢出先封頁；每個 part（除最後）自成一頁。
+  /// [origin] 為這些 part 共同來源的原始 block 索引（切片不產生新的原始 block）。
   void _addParts(
     _Packer pk,
     List<ParagraphBlock> parts,
     ReaderLayoutMetrics m,
+    int origin,
   ) {
     for (int i = 0; i < parts.length; i++) {
       final ParagraphBlock part = parts[i];
@@ -95,7 +114,7 @@ class ReaderPaginator {
         includeBottom: i == parts.length - 1,
       );
       if (pk.cur.isNotEmpty && pk.h + est > pk.avail) pk.flush();
-      pk.add(part, est);
+      pk.add(part, est, origin);
       if (i < parts.length - 1) pk.flush();
     }
   }
@@ -218,7 +237,14 @@ class _Packer {
 
   final double avail;
   final List<List<ReaderBlock>> pages = <List<ReaderBlock>>[];
+
+  /// 與 [pages] 等長：每頁首個 block 的**原始** blocks 索引（見 `paginateIndexed`）。
+  final List<int> pageOrigins = <int>[];
+
   List<ReaderBlock> cur = <ReaderBlock>[];
+
+  /// 目前這一頁首個 block 的原始索引（`cur` 為空時為 null）。
+  int? curOrigin;
   double h = 0;
 
   double get remaining => avail - h;
@@ -226,18 +252,22 @@ class _Packer {
   void flush() {
     if (cur.isNotEmpty) {
       pages.add(cur);
+      pageOrigins.add(curOrigin ?? 0);
       cur = <ReaderBlock>[];
+      curOrigin = null;
       h = 0;
     }
   }
 
-  void add(ReaderBlock b, double est) {
+  void add(ReaderBlock b, double est, int origin) {
+    curOrigin ??= origin; // 只有頁首那一個決定本頁的原始索引
     cur.add(b);
     h += est;
   }
 
-  void ownPage(ReaderBlock b) {
+  void ownPage(ReaderBlock b, int origin) {
     flush();
+    curOrigin = origin;
     cur.add(b);
     flush();
   }

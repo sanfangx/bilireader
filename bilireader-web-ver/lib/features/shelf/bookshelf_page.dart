@@ -602,6 +602,15 @@ class _BookshelfPageState extends State<BookshelfPage> {
   /// ▶ 續讀：抓目錄 → 開閱讀器至上次章節（章內位置由閱讀器依 drift ReaderAnchor 還原）。
   /// 已完整下載的書離線也能續讀（目錄改用離線清單，不需網路）。
   Future<void> _resume(ReadProgress p, {String? cover}) async {
+    // loading dialog 只能關一次。原本成功路徑先 pop 關 loading、之後若再拋例外，
+    // catch 會**再 pop 一次**——把底下唯一的 AppShell 路由彈掉（黑畫面）。
+    bool loadingOpen = true;
+    void closeLoading() {
+      if (!loadingOpen || !mounted) return;
+      loadingOpen = false;
+      Navigator.of(context).pop();
+    }
+
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -619,8 +628,15 @@ class _BookshelfPageState extends State<BookshelfPage> {
         flat = OfflineStore.instance.chaptersFor(p.novelId);
         if (flat.isEmpty) rethrow;
       }
+      // 站方限流（429）／CF 挑戰頁會被解析成**空目錄而非例外**（catalog() 無 _assertListable，
+      // 且 dio validateStatus 全放行），因此上面的 catch 根本不會觸發、離線退路也走不到。
+      // 空目錄若直接往下走，`clamp(0, -1)` 會拋 ArgumentError → 落入外層 catch。
+      if (flat.isEmpty) {
+        flat = OfflineStore.instance.chaptersFor(p.novelId);
+      }
+      if (flat.isEmpty) throw Exception('empty-catalog');
       if (!mounted) return;
-      Navigator.of(context).pop(); // 關閉 loading
+      closeLoading();
       final idx = p.chapterIndex.clamp(0, flat.length - 1);
       Navigator.of(context).push(
         MaterialPageRoute(
@@ -635,7 +651,7 @@ class _BookshelfPageState extends State<BookshelfPage> {
       );
     } catch (_) {
       if (!mounted) return;
-      Navigator.of(context).pop();
+      closeLoading();
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('載入失敗，請稍後再試')));

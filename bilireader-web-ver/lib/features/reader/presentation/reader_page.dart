@@ -9,8 +9,17 @@ import '../../../core/network/linovelib_api.dart';
 import '../../../core/reading/local_store.dart' show LocalStore, ReadProgress;
 import '../../../core/storage/database/database_providers.dart';
 import '../../../theme/app_colors.dart';
+import '../chapter_extractor.dart' show ChapterOrderNotRestoredException;
 import '../data/bookmark_local_data_source.dart';
+import '../data/chapter_text_providers.dart' show chapterTextRepositoryProvider;
+import '../data/chapter_text_repository.dart'
+    show
+        ChapterContentTruncatedException,
+        ChapterTextRepository,
+        ChapterUnavailableException;
 import '../domain/bookmark.dart';
+import '../domain/chapter_text.dart';
+import '../domain/reader_content_builder.dart';
 import '../domain/reader_anchor.dart';
 import '../domain/reader_block.dart';
 import '../domain/reader_settings.dart';
@@ -119,6 +128,92 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     chapterName: widget.chapters[_index].title,
   );
 
+  /// 使用者明確選擇要閱讀的「不完整」正文（站方截斷版）。null＝未選擇。
+  ///
+  /// 鐵律「Never pre-block chapters based on HTML markers」：站方的一串字可以否決
+  /// **快取**，但不能否決**閱讀**。截斷的那部分是真實正文，讀一部分好過完全讀不到。
+  /// 僅存在於這個 State（換章即失效），**永不落 drift/離線檔**。
+  ReaderChapterContent? _partialOverride;
+
+  /// 目前顯示的是不完整正文 → **一切持久化寫入都必須停手**。
+  ///
+  /// 截斷版的 block 清單只有完整章節的一小部分，據此算出的 `blockIndex` /
+  /// `sourceTextOffset` / `progressInChapter` / `textQuote` 對完整章節毫無意義：
+  /// 讀到截斷版的結尾會被記成「這章 100%」，之後拿到完整版時進度與書籤都會落在錯的
+  /// 位置。這與快取被殘缺內容污染是同一類的靜默腐化，只是換成進度/書籤這條路徑。
+  bool get _isPartial => _partialOverride != null;
+
+  /// 渲染不完整正文（一次性）。走與正常路徑相同的 `ReaderContentBuilder`，確保排版一致。
+  void _readPartial(ChapterText partial) {
+    final ReaderChapterContent c = ReaderChapterContent(
+      chapterName: partial.chapterName,
+      blocks: const ReaderContentBuilder().build(
+        partial,
+        convert: _identityText,
+        illustrationSpoiler: false,
+        chapterCommentEnabled: false,
+      ),
+    );
+    // 換內容等同換章：殘留的是上一次渲染的 GlobalKey，不清會讓位置還原對到舊 block。
+    _blockKeys.clear();
+    setState(() => _partialOverride = c);
+    _onChapterLoaded(c);
+  }
+
+  /// 預抓下一章：使用者還在讀這一章時就在背景擷取並寫進 drift 快取。
+  ///
+  /// 「按下一章要等很久」的成本本質上是一次 WebView 擷取；把它挪到使用者仍在閱讀的
+  /// 空檔完成，翻頁時就直接命中快取。**正確性完全不變**——走的是同一條倉儲路徑，
+  /// 順序閘門與截斷偵測照樣把關，失敗也只是沒預抓到。
+  ///
+  /// 只抓一章（不做更深的預讀），避免對站方造成額外壓力。
+  void _prefetchNextChapter() {
+    if (_isPartial) return; // 不完整內容不代表下一章的狀況，別連鎖預抓
+    final Chapter? next = chapterNavAt(widget.chapters, _index).next;
+    final String? url = next?.url;
+    if (next == null || url == null || url.isEmpty) return;
+    final int cid = int.tryParse(_cidRe.firstMatch(url)?.group(1) ?? '') ?? 0;
+    if (cid <= 0) return; // 站方假連結章 → 需解析閱讀鏈，留給正常路徑處理
+    unawaited(
+      Future<void>(() async {
+        final ChapterTextRepository repo = ref.read(
+          chapterTextRepositoryProvider,
+        );
+        if (await repo.isCached(
+          articleId: widget.articleId,
+          chapterId: cid,
+        )) {
+          return;
+        }
+        try {
+          await repo.getChapterText(
+            articleId: widget.articleId,
+            chapterId: cid,
+            url: url,
+            chapterName: next.title,
+          );
+        } catch (_) {
+          // 預抓失敗無所謂：使用者真的翻過去時會走正常路徑，並看到正確的錯誤畫面。
+        }
+      }),
+    );
+  }
+
+  /// 單章自救：**先刪掉這章的快取列**再重載。
+  ///
+  /// 單純 `ref.invalidate` 只會讓倉儲再讀一次 drift，命中的還是同一份壞內容——順序亂掉的
+  /// 快取沒有可辨識的標記（不像截斷有字串可比對），無法自癒，只能明確丟棄後重抓。
+  Future<void> _refetchChapter(ChapterRef chapterRef) async {
+    setState(() => _partialOverride = null);
+    if (chapterRef.chapterId > 0) {
+      await ref
+          .read(chapterCacheDaoProvider)
+          .deleteChapterContent(chapterRef.articleId, chapterRef.chapterId);
+    }
+    if (!mounted) return;
+    ref.invalidate(readerChapterContentProvider(chapterRef));
+  }
+
   /// 目前章是否仍待解析真實 URL（站方假連結）。
   bool get _needsUrlResolve {
     final String? u = widget.chapters[_index].url;
@@ -150,6 +245,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _progressRepo = ref.read(readingProgressRepositoryProvider);
+    // 捲動模式鏡射初值（build 期會持續同步，見 [_verticalMode]）。
+    _verticalMode =
+        ref.read(readerSettingsControllerProvider).scrollMode ==
+        ReaderScrollMode.vertical;
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted || !_canPersist) return;
       // 入口未帶封面時，回填既有進度封面（避免以空封面覆蓋）。
@@ -194,13 +293,31 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   double _restoreFraction = 0;
 
   // 翻頁模式的跨模式錨點接線：blockIndex（第幾個 block）為垂直/翻頁共用、版面無關的位置錨點。
-  int _pageFirstBlock = 0; // 翻頁模式當前頁首個 block 的全域序號（由 ReaderPagedView 回報）
+
+  /// 翻頁模式當前頁首個 block 的全域序號，由 `ReaderPagedView.onFirstBlockIndex` 回報。
+  ///
+  /// **null＝本章尚未回報過**（初始頁與還原頁都不觸發 `onPageChanged`）。這個「尚未知道」
+  /// 必須與「第 0 個 block」區分開來，否則會踩到兩個坑：
+  /// (1) 換章時不重置 → `_onChapterLoaded` 結尾的 `_saveProgressNow()` 會把**上一章**停留頁的
+  ///     block 序號寫成新章的進度錨點（下次續讀直接跳過新章開頭一大段）；
+  /// (2) 若改成換章重置為 0 → 又會在還原完成前把存檔的錨點覆寫成 0，等於每次進章都把
+  ///     章內位置歸零。
+  /// 故：未回報前以 `_restoreBlock`（本章正要還原到的位置）為準，見 [_currentBlockIndex]。
+  int? _pageFirstBlock;
   int? _restoreBlock; // 翻頁模式待跳轉的目標 block 序號
   int _restoreSeq = 0; // 遞增即請求 ReaderPagedView 跳到 _restoreBlock 所在頁
 
-  bool get _isVertical =>
-      ref.read(readerSettingsControllerProvider).scrollMode ==
-      ReaderScrollMode.vertical;
+  /// 目前是否為垂直捲動模式——**鏡射自 settings，不即時讀 provider**。
+  ///
+  /// `dispose()` 會呼叫 `_saveProgressNow()` flush 最後一筆進度，該路徑經
+  /// `_currentAnchor` → `_currentBlockIndex` 需要知道目前模式。但 riverpod 對已 unmount
+  /// 的 widget 存取 `ref` 一律 throw StateError（`_assertNotDisposed` 檢查 `context.mounted`，
+  /// 而 Flutter 是先 unmount element 再呼叫 `State.dispose()`）——原本在此直接 `ref.read`
+  /// 會讓每次離開閱讀器都拋例外，連帶使 `_scroll.dispose()` 與 `super.dispose()` 不執行。
+  /// 故與 [_progressRepo] 同樣採「掛載期取初值 + build 期同步」的鏡射欄位。
+  bool _verticalMode = true;
+
+  bool get _isVertical => _verticalMode;
 
   double _scrollFraction() =>
       _scroll.hasClients && _scroll.position.maxScrollExtent > 0
@@ -217,6 +334,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       _fraction = 0;
       _restoreFraction = 0;
       _restoredChapterId = -1;
+      _partialOverride = null; // 換章即失效：不完整內容只對使用者選中的那一章有效
+      // 上一章的頁首 block 序號對新章毫無意義 → 清成「尚未回報」（見 [_pageFirstBlock]）。
+      _pageFirstBlock = null;
+      _restoreBlock = null;
     });
     if (_scroll.hasClients) _scroll.jumpTo(0);
   }
@@ -240,10 +361,14 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   }
 
   /// 目前位置的 block 全域序號——垂直＝viewport 頂端 block；翻頁＝當前頁首個 block。
+  ///
+  /// 翻頁模式在 `ReaderPagedView` 首次回報前（初始頁/還原頁不觸發 `onPageChanged`）
+  /// 以待還原的目標 `_restoreBlock` 為準：那正是畫面即將停留的位置，
+  /// 用它存檔等於原值寫回，不會把既有錨點覆寫掉（見 [_pageFirstBlock]）。
   int _currentBlockIndex() {
     final int idx = _isVertical
         ? (_firstVisibleBlockIndex() ?? 0)
-        : _pageFirstBlock;
+        : (_pageFirstBlock ?? _restoreBlock ?? 0);
     if (_blocks.isEmpty) return 0;
     return idx.clamp(0, _blocks.length - 1);
   }
@@ -366,6 +491,10 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   void _saveProgressNow() {
     _saveDebounce?.cancel();
     if (_chapterName.isEmpty) return;
+    // 不完整正文的位置換算不出有意義的錨點 → 一律不寫（見 [_isPartial]）。
+    // 注意 `_goToIndex` 是「先 _saveProgressNow() 再清 _partialOverride」，故離開
+    // 截斷章時這裡仍為 true，正確地不留下錯誤進度。
+    if (_isPartial) return;
     // 相容層：同步寫舊 `LocalStore`（書架「繼續閱讀」目前讀此，章級位置）。與 drift 富錨點並存，
     // 直到書架遷到 `continueReading`(drift) provider 為止。訪客也寫（LocalStore 非 owner-scoped）。
     LocalStore.instance.saveProgress(
@@ -404,6 +533,11 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   Future<void> _openBookmarks() async {
     if (!_canPersist) {
       _toast('請先登入');
+      return;
+    }
+    // 書籤錨點同樣依 blockIndex —— 對著截斷版建立的書籤會指向完整章節的錯誤位置。
+    if (_isPartial) {
+      _toast('目前顯示的是不完整內容，請先「重新擷取」成功後再加書籤');
       return;
     }
     await showReaderBookmarkSheet(
@@ -454,10 +588,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   }
 
   void _restoreVerticalPosition(int blockIndex, double frac) {
-    final bool vertical =
-        ref.read(readerSettingsControllerProvider).scrollMode ==
-        ReaderScrollMode.vertical;
-    if (!vertical) return;
+    if (!_isVertical) return;
     if (blockIndex > 0) {
       _scrollToBlock(blockIndex, fallbackFrac: frac);
     } else {
@@ -486,6 +617,7 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
     _blockCount = content.blocks.length;
     if (_restoredChapterId == _chapterId) return;
     _restoredChapterId = _chapterId;
+    _prefetchNextChapter();
 
     if (_canPersist) {
       final ReadingProgress? saved =
@@ -553,6 +685,8 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
   @override
   Widget build(BuildContext context) {
     final ReaderSettings settings = ref.watch(readerSettingsControllerProvider);
+    // 同步捲動模式鏡射：build 有 watch settings，故此欄位恆為最新（見 [_verticalMode]）。
+    _verticalMode = settings.scrollMode == ReaderScrollMode.vertical;
     final ReaderTheme theme = ref.watch(readerThemeControllerProvider).active;
     final ReaderStyle style = ReaderStyle.from(settings, theme);
 
@@ -601,23 +735,44 @@ class _ReaderPageState extends ConsumerState<ReaderPage>
       body: Stack(
         children: <Widget>[
           Positioned.fill(
-            child: content.when(
-              skipLoadingOnReload: true,
-              loading: () => Center(
-                child: CircularProgressIndicator(color: style.textColor),
-              ),
-              error: (Object e, StackTrace _) => _ErrorView(
-                style: style,
-                onRetry: () =>
-                    ref.invalidate(readerChapterContentProvider(chapterRef)),
-                onPrev: nav.hasPrev ? () => _goToIndex(_index - 1) : null,
-                onNext: nav.hasNext ? () => _goToIndex(_index + 1) : null,
-                onCatalog: _openCatalog,
-              ),
-              data: (ReaderChapterContent c) =>
-                  _buildReader(c, nav, style, settings),
-            ),
+            // 使用者已明確選擇「仍要閱讀」不完整內容 → 蓋過 error 狀態直接渲染。
+            child: _partialOverride != null
+                ? _buildReader(_partialOverride!, nav, style, settings)
+                : content.when(
+                    skipLoadingOnReload: true,
+                    loading: () => Center(
+                      child: CircularProgressIndicator(color: style.textColor),
+                    ),
+                    error: (Object e, StackTrace _) => _ErrorView(
+                      style: style,
+                      error: e,
+                      onRetry: () => _refetchChapter(chapterRef),
+                      onReadPartial: e is ChapterContentTruncatedException
+                          ? () => _readPartial(e.partial)
+                          : null,
+                      onPrev: nav.hasPrev ? () => _goToIndex(_index - 1) : null,
+                      onNext: nav.hasNext ? () => _goToIndex(_index + 1) : null,
+                      onCatalog: _openCatalog,
+                    ),
+                    data: (ReaderChapterContent c) =>
+                        _buildReader(c, nav, style, settings),
+                  ),
           ),
+          // 不完整內容必須**持續**可見地標示：否則畫面看起來就是一章正常內容，
+          // 使用者會以為章節到此為止。順帶把「重新擷取」放進來——否則進了 partial
+          // 模式後 _ErrorView 不再渲染，就再也按不到重試。
+          if (_isPartial)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: SafeArea(
+                child: _PartialBanner(
+                  style: style,
+                  onRefetch: () => _refetchChapter(chapterRef),
+                ),
+              ),
+            ),
           if (settings.dimLevel > 0)
             Positioned.fill(
               child: IgnorePointer(
@@ -1097,17 +1252,106 @@ class _TocRow {
   bool get isHeader => chapterIndex < 0;
 }
 
+/// tw.linovelib 本即繁體，不套 OpenCC（與 `readerChapterContent` 的 `convert` 一致）。
+String _identityText(String s) => s;
+
+/// 章節載入失敗的成因文案。
+///
+/// 三種失敗**成因不同、使用者該做的事也不同**，統一顯示「章節載入失敗」會讓人以為是網路
+/// 問題而一直重試（截斷的情況重試通常無效）。故依例外型別給出可執行的說明。
+({String title, String hint}) describeChapterError(Object e) {
+  if (e is ChapterContentTruncatedException) {
+    return (
+      title: '內容不完整',
+      hint: '伺服器只回傳了部分正文（頁面會顯示「內容加載失敗」）。\n'
+          '這通常是網站的反爬蟲判定，重試多半無效；稍後再試，\n'
+          '或直接閱讀已取得的部分（不會存入快取）。',
+    );
+  }
+  if (e is ChapterOrderNotRestoredException) {
+    return (
+      title: '段落順序尚未還原',
+      hint: '網站的段落還原腳本這次沒跑完，內容會是亂序的，\n已擋下不存入快取。請重試。',
+    );
+  }
+  if (e is ChapterUnavailableException) {
+    return (
+      title: '無法取得本章',
+      hint: '可能是 VIP 鎖章、空章或需要登入。',
+    );
+  }
+  return (title: '章節載入失敗', hint: '');
+}
+
+/// 「正在顯示不完整內容」的常駐提示條。
+///
+/// 兩個作用：(1) 讓使用者始終知道這章是殘缺的——否則畫面與正常章節無異；
+/// (2) 提供進入 partial 模式後唯一的重試入口（`_ErrorView` 此時已不渲染）。
+class _PartialBanner extends StatelessWidget {
+  const _PartialBanner({required this.style, required this.onRefetch});
+
+  final ReaderStyle style;
+  final VoidCallback onRefetch;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color fg = style.textColor;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+      padding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
+      decoration: BoxDecoration(
+        color: AppColors.surf.withValues(alpha: 0.96),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.hotOrange.withValues(alpha: 0.5)),
+      ),
+      child: Row(
+        children: <Widget>[
+          Icon(Icons.warning_amber_rounded,
+              size: 16, color: AppColors.hotOrange),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '內容不完整，僅顯示已取得的部分（不會存入快取，也不會記錄進度與書籤）',
+              style: TextStyle(
+                  color: fg.withValues(alpha: 0.8), fontSize: 11.5, height: 1.4),
+            ),
+          ),
+          TextButton(
+            onPressed: onRefetch,
+            style: TextButton.styleFrom(
+              minimumSize: const Size(0, 32),
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+            ),
+            child: Text('重新擷取',
+                style: TextStyle(
+                    color: AppColors.acc,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _ErrorView extends StatelessWidget {
   const _ErrorView({
     required this.style,
+    required this.error,
     required this.onRetry,
+    this.onReadPartial,
     this.onPrev,
     this.onNext,
     this.onCatalog,
   });
 
   final ReaderStyle style;
+  final Object error;
   final VoidCallback onRetry;
+
+  /// 內容被站方截斷時的降級路徑：仍閱讀已取得的部分（不快取）。
+  /// 鐵律：站方的標記可以否決快取，不能否決閱讀。
+  final VoidCallback? onReadPartial;
   // 逃生路徑：解析不了的假連結章「重試」無效時，仍能返回/上下章/開目錄離開（不卡死路）。
   final VoidCallback? onPrev;
   final VoidCallback? onNext;
@@ -1115,6 +1359,7 @@ class _ErrorView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final ({String title, String hint}) d = describeChapterError(error);
     return SafeArea(
       child: Stack(
         children: <Widget>[
@@ -1130,10 +1375,37 @@ class _ErrorView extends StatelessWidget {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                Text('章節載入失敗',
+                Text(d.title,
                     style: TextStyle(color: style.textColor, fontSize: 15)),
+                if (d.hint.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 8),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 32),
+                    child: Text(
+                      d.hint,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                          color: style.textColor.withValues(alpha: 0.62),
+                          fontSize: 12,
+                          height: 1.6),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 12),
-                OutlinedButton(onPressed: onRetry, child: const Text('重試')),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    OutlinedButton(
+                        onPressed: onRetry, child: const Text('重新擷取')),
+                    if (onReadPartial != null) ...<Widget>[
+                      const SizedBox(width: 10),
+                      FilledButton.tonal(
+                        onPressed: onReadPartial,
+                        child: const Text('仍要閱讀'),
+                      ),
+                    ],
+                  ],
+                ),
                 const SizedBox(height: 16),
                 Row(
                   mainAxisSize: MainAxisSize.min,

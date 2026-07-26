@@ -82,16 +82,18 @@ class _ReaderPagedViewState extends State<ReaderPagedView> {
     }
   }
 
-  /// 全域 block 序號 → 所在頁序（[_pageStart] 遞增，取最後一個起點 ≤ blockIndex 的頁）。
+  /// 全域 block 序號 → 所在頁序（[_pageStart] 非遞減）。
+  ///
+  /// 一個 block 被切成多頁時，那幾頁的起始索引是**同一個值**，此時要回傳**第一頁**
+  /// （＝該 block 的開頭）。取「最後一個 ≤ blockIndex」會跳到該 block 的最後一頁，
+  /// 還原書籤/進度時會直接略過整段開頭。
   int _pageOfBlock(int blockIndex) {
     if (_pageStart.isEmpty) return 0;
     int page = 0;
     for (int i = 0; i < _pageStart.length; i++) {
-      if (_pageStart[i] <= blockIndex) {
-        page = i;
-      } else {
-        break;
-      }
+      if (_pageStart[i] > blockIndex) break;
+      // 只在起始索引「變大」時前進 → 落在重複區段的第一頁。
+      if (i == 0 || _pageStart[i] != _pageStart[i - 1]) page = i;
     }
     return page.clamp(0, _pages.length - 1);
   }
@@ -130,14 +132,18 @@ class _ReaderPagedViewState extends State<ReaderPagedView> {
       availableWidth: width - _hPad * 2,
       availableHeight: height - _vPad * 2 - _safety,
     );
-    _pages = _paginator.paginate(widget.blocks, m);
-    if (_pages.isEmpty) _pages = <List<ReaderBlock>>[widget.blocks];
-    // 每頁首個 block 的全域序號前綴和（跨模式錨點 blockIndex ↔ 頁序 的換算依據）。
-    _pageStart = <int>[];
-    int acc = 0;
-    for (final List<ReaderBlock> p in _pages) {
-      _pageStart.add(acc);
-      acc += p.length;
+    final ({List<List<ReaderBlock>> pages, List<int> pageStartOriginIndex})
+    result = _paginator.paginateIndexed(widget.blocks, m);
+    _pages = result.pages;
+    // 每頁首個 block 的**原始** blocks 索引（跨模式錨點 blockIndex ↔ 頁序 的換算依據）。
+    //
+    // 必須向分頁器要，不能用「逐頁累加分頁後 block 數」自己算：長段會被切成多個
+    // ParagraphBlock，分頁後的索引空間比原始的大，累加出來的值會隨切分次數單調偏移，
+    // 而這個數字正是寫進 ReaderAnchor.blockIndex 的錨點。
+    _pageStart = result.pageStartOriginIndex;
+    if (_pages.isEmpty) {
+      _pages = <List<ReaderBlock>>[widget.blocks];
+      _pageStart = <int>[0];
     }
     // 有未套用的還原目標（書籤/進度）→ 跳到該 block 所在頁；否則以「目前頁比例」保住當前閱讀
     // 位置（字級/尺寸變更重分頁時）。
