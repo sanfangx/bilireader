@@ -1,0 +1,59 @@
+# BiliReader – 打包未签名 IPA（bilireader-api-ver）
+#
+# 在 macOS runner 上构建 bilireader-api-ver 的未签名 IPA（.app 不签名，直接压成
+# Payload/Runner.app）。产物可侧载到越狱设备 / 模拟器安装流程，或配合
+# 签名工具（codesign / 各类 sideload 工具）自行补签。
+#
+# 触发方式：
+#   - 手动（Actions 页 -> Run workflow）
+#   - push 到 main 且改动涉及 bilireader-api-ver 或本 workflow
+name: Build Unsigned IPA (bilireader-api-ver)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'bilireader-api-ver/**'
+      - '.github/workflows/build-unsigned-ipa.yml'
+
+jobs:
+  build-unsigned-ipa:
+    name: Build unsigned IPA
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: bilireader-api-ver
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          # 与本地验证环境一致（Flutter 3.44.4 / Dart 3.12.2，满足 sdk ^3.9.0）。
+          # 如需跟随最新 stable，删掉这行即可。
+          flutter-version: 3.44.4
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Generate code
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Build unsigned IPA
+        # --no-codesign：不进行任何代码签名，产物为未签名 IPA。
+        run: flutter build ipa --release --no-codesign
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bilireader-api-ver-unsigned-ipa
+          # upload-artifact 的 path 相对 workspace 根目录，而非上方 working-directory。
+          path: bilireader-api-ver/build/ios/ipa/*.ipa
+          if-no-files-found: error
