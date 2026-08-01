@@ -21,7 +21,9 @@ on:
 jobs:
   build-unsigned-ipa:
     name: Build unsigned IPA
-    runs-on: macos-15
+    # device_info_plus 13.x 的 iOS 原生代码用到 iOS 26 SDK 的 isiOSAppOnVision，
+    # 需要 Xcode 26+；macos-15 镜像只带 Xcode 16，编译会失败。
+    runs-on: macos-26
     timeout-minutes: 60
     defaults:
       run:
