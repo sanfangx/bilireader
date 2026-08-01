@@ -49,13 +49,22 @@ jobs:
         run: dart run build_runner build --delete-conflicting-outputs
 
       - name: Build unsigned IPA
-        # --no-codesign：不进行任何代码签名，产物为未签名 IPA。
+        # --no-codesign：不进行任何代码签名。注意：Flutter 对 --no-codesign 只产出
+        # build/ios/archive/Runner.xcarchive 并跳过 IPA 导出（见 flutter_tools
+        # build_ios.dart 中 "skipping IPA"），因此下一步从归档手动打包。
         run: flutter build ipa --release --no-codesign
+
+      - name: Package unsigned IPA from archive
+        run: |
+          mkdir -p Payload
+          cp -R build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app Payload/
+          # ditto 保留 symlink（Flutter.framework 依赖），--keepParent 保证 zip 根为 Payload/。
+          ditto -c -k --sequesterRsrc --keepParent Payload bilireader-api-ver-unsigned.ipa
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: bilireader-api-ver-unsigned-ipa
           # upload-artifact 的 path 相对 workspace 根目录，而非上方 working-directory。
-          path: bilireader-api-ver/build/ios/ipa/*.ipa
+          path: bilireader-api-ver/bilireader-api-ver-unsigned.ipa
           if-no-files-found: error
