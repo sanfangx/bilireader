@@ -50,6 +50,10 @@ coverage/
 **/ios/.symlinks/
 **/ios/build/
 **/ios/Runner.xcworkspace/
+# Swift Package Manager 集成（Flutter 3.35+ 默认开启）要求 Runner.xcworkspace
+# 存在；此 workspace 由模板生成、内容稳定，故提交进仓库（例外规则须成对出现）。
+!**/ios/Runner.xcworkspace/
+!**/ios/Runner.xcworkspace/**
 **/ios/Runner/GeneratedPluginRegistrant.*
 
 # Android reverse-engineering derived artifacts.
