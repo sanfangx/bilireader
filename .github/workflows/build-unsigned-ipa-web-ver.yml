@@ -1,0 +1,67 @@
+# BiliReader – 打包未签名 IPA（bilireader-web-ver）
+#
+# 与 api-ver 版本同构：macOS runner 构建未签名 IPA。
+# 注意：Flutter 对 `flutter build ipa --no-codesign` 只产出
+# build/ios/archive/Runner.xcarchive 并跳过 IPA 导出，因此归档后手动打包成
+# Payload 结构（ditto 保留 symlink），再上传为工件。
+#
+# 触发方式：
+#   - 手动（Actions 页 -> Run workflow）
+#   - push 到 main 且改动涉及 bilireader-web-ver 或本 workflow
+name: Build Unsigned IPA (bilireader-web-ver)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'bilireader-web-ver/**'
+      - '.github/workflows/build-unsigned-ipa-web-ver.yml'
+
+jobs:
+  build-unsigned-ipa:
+    name: Build unsigned IPA
+    # device_info_plus 等插件的 iOS 原生代码用到 iOS 26 SDK API，需要 Xcode 26+。
+    runs-on: macos-26
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: bilireader-web-ver
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          # 与本地验证环境一致（Flutter 3.44.4 / Dart 3.12.2，满足 web-ver 的 sdk ^3.12.2）。
+          # 如需跟随最新 stable，删掉这行即可。
+          flutter-version: 3.44.4
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Generate code
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: Build unsigned archive
+        run: flutter build ipa --release --no-codesign
+
+      - name: Package unsigned IPA from archive
+        run: |
+          mkdir -p Payload
+          cp -R build/ios/archive/Runner.xcarchive/Products/Applications/Runner.app Payload/
+          # ditto 保留 symlink，--keepParent 保证 zip 根为 Payload/。
+          ditto -c -k --sequesterRsrc --keepParent Payload bilireader-web-ver-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bilireader-web-ver-unsigned-ipa
+          # upload-artifact 的 path 相对 workspace 根目录，而非上方 working-directory。
+          path: bilireader-web-ver/bilireader-web-ver-unsigned.ipa
+          if-no-files-found: error
